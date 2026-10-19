@@ -43,10 +43,13 @@ function freshState(settings, seats) {
 let S;
 try { S = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch {}
 if (!S || S.version !== VERSION) S = freshState();
-function persist() { fs.writeFile(STATE_FILE, JSON.stringify(S, null, 2), () => {}); }
+// state.json holds each phone's private id, so only this computer's user may read it.
+function persist() { fs.writeFile(STATE_FILE, JSON.stringify(S, null, 2), { mode: 0o600 }, () => {}); }
+try { fs.chmodSync(STATE_FILE, 0o600); } catch {}
 
 const cur = () => S.rounds[S.round];
 const sum = a => a.reduce((x, v) => x + (v || 0), 0);
+const validToken = t => typeof t === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(t);
 const seatOf = token => (token ? S.seats.findIndex(s => s && s.token === token) : -1);
 const full = () => S.seats.every(Boolean);
 
@@ -161,7 +164,7 @@ const playerActions = {
     need(S.phase !== "setup", "The host hasn't started the game yet.");
     name = String(name || "").trim().slice(0, 18);
     need(name, "Type your name.");
-    need(token, "Missing phone id.");
+    need(validToken(token), "Missing phone id.");
     const mine = seatOf(token);
     if (mine >= 0) { S.seats[mine].name = name; return; }
     const free = S.seats.findIndex(s => !s);
@@ -208,12 +211,47 @@ function lanUrls() {
   return out.map(o => o.url);
 }
 const isLocal = req => ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress);
+// Only answer to names that point at this computer, so a web page elsewhere can't reach the
+// server through a look-alike domain (DNS rebinding) and read the host's view.
+function hostAllowed(req) {
+  let h;
+  try { h = new URL("http://" + (req.headers.host || "")).hostname.replace(/^\[|\]$/g, ""); } catch { return false; }
+  if (["localhost", "127.0.0.1", "::1"].includes(h)) return true;
+  return Object.values(os.networkInterfaces()).flat().some(a => a && a.address === h);
+}
+// Actions must come from this app's own pages, not from another site open in the same browser.
+function sameOrigin(req) {
+  const o = req.headers.origin;
+  if (o && o !== "http://" + req.headers.host) return false;
+  return /^application\/json\b/i.test(req.headers["content-type"] || "");
+}
+const BASE_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "referrer-policy": "no-referrer",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+};
+// Allow exactly this page's own inline script (by hash), our files, Google Fonts and the QR library.
+function csp(html) {
+  const hashes = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+    .map(m => `'sha256-${crypto.createHash("sha256").update(m[1]).digest("base64")}'`);
+  return [
+    "default-src 'none'",
+    `script-src 'self' https://cdnjs.cloudflare.com ${hashes.join(" ")}`,
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src https://fonts.gstatic.com",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+  ].join("; ");
+}
 const TYPES = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript" };
 
 function sendFile(res, file) {
   fs.readFile(path.join(PUBLIC, file), (err, buf) => {
     if (err) { res.writeHead(404); return res.end("Not found"); }
-    res.writeHead(200, { "content-type": TYPES[path.extname(file)] || "application/octet-stream", "cache-control": "no-store" });
+    const ext = path.extname(file), extra = ext === ".html" ? { "content-security-policy": csp(buf.toString()) } : {};
+    res.writeHead(200, { ...BASE_HEADERS, ...extra, "content-type": TYPES[ext] || "application/octet-stream", "cache-control": "no-store" });
     res.end(buf);
   });
 }
@@ -221,6 +259,7 @@ function sendFile(res, file) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://x");
   const p = url.pathname;
+  if (!hostAllowed(req)) { res.writeHead(403, BASE_HEADERS); return res.end("Forbidden"); }
 
   if (p === "/") {
     if (!isLocal(req)) { res.writeHead(302, { location: "/play" }); return res.end(); }
@@ -230,7 +269,7 @@ const server = http.createServer((req, res) => {
   if (["/style.css", "/common.js", "/voice.js"].includes(p)) return sendFile(res, p.slice(1));
 
   if (p === "/events") {
-    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
+    res.writeHead(200, { ...BASE_HEADERS, "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
     // Only the laptop's own host page sees every number; a phone always gets the filtered view.
     const c = { res, token: url.searchParams.get("token") || "", host: isLocal(req) && url.searchParams.get("host") === "1" };
     clients.add(c);
@@ -240,12 +279,14 @@ const server = http.createServer((req, res) => {
   }
 
   if (p === "/api/action" && req.method === "POST") {
+    if (!sameOrigin(req)) { res.writeHead(403, BASE_HEADERS); return res.end("Forbidden"); }
     let body = "";
     req.on("data", d => { body += d; if (body.length > 1e5) req.destroy(); });
     req.on("end", () => {
       let a;
       try { a = JSON.parse(body); } catch { a = {}; }
       const fn = playerActions[a.type] || (isLocal(req) && hostActions[a.type]);
+      for (const [k, v] of Object.entries(BASE_HEADERS)) res.setHeader(k, v);
       res.setHeader("content-type", "application/json");
       if (!fn) { res.writeHead(403); return res.end(JSON.stringify({ error: "Only the host laptop can do that." })); }
       try { fn(a); advance(); } catch (e) {
@@ -258,7 +299,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  res.writeHead(404); res.end("Not found");
+  res.writeHead(404, BASE_HEADERS); res.end("Not found");
 });
 // If the port is taken by another program, try the next one.
 server.on("error", e => {

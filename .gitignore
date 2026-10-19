@@ -1,3 +1,12 @@
 state.json
 node_modules/
 .DS_Store
+
+# never commit secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.crt
+secrets/

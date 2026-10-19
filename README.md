@@ -58,6 +58,19 @@ public/voice.js   the announcer
 public/style.css  doodle theme (light and dark)
 ```
 
+## Security
+
+It's meant for a trusted home Wi-Fi, but it still locks itself down:
+
+- **Only the laptop is the host.** Host controls and the full table (every hidden call) are only available to the laptop itself, never to a phone.
+- **Phones only get what they're allowed to see.** In secret mode, other players' numbers never leave the server, so they can't be found by digging through the page.
+- **Phone IDs stay private.** Each phone gets a random ID from the browser's secure random generator. It's never shown to other players, and `state.json` (where IDs and scores are saved) can only be read by your user account and is never committed.
+- **Other websites can't interfere.** The server only answers to this computer's own addresses, which blocks DNS-rebinding tricks. It also rejects actions sent from other websites.
+- **The pages are locked down.** They send a strict Content-Security-Policy, can't be put inside another site's frame, and the QR library from the CDN is pinned with an integrity hash.
+- **There are no secrets to leak.** There are no accounts, API keys or `.env` files, and `.gitignore` blocks `.env`, key and certificate files in case any are ever added.
+
+Traffic between the phones and the laptop is plain `http` on your local network, so play on a Wi-Fi network you trust.
+
 ## License
 
 MIT

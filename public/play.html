@@ -18,7 +18,11 @@
 "use strict";
 // Each phone gets its own id so the server knows which seat is whose.
 let token = lsGet("callbreak.token");
-if (!token) { token = Math.random().toString(36).slice(2) + Date.now().toString(36); lsSet("callbreak.token", token); }
+// A private random id for this phone (crypto.getRandomValues works on plain http, unlike randomUUID).
+if (!token || !/^[A-Za-z0-9_-]{16,64}$/.test(token)) {
+  token = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+  lsSet("callbreak.token", token);
+}
 let st = null, pick = null, editing = false, key = "";
 
 connect("token=" + encodeURIComponent(token), s => {
