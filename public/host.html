@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Call Break Host</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Delius+Swash+Caps&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head><body>
+<div class="wrap">
+  <header>
+    <div class="brand"><span class="suit" aria-hidden="true">♠</span><h1>Call Break</h1><span class="muted">host</span></div>
+    <span class="pill" id="pill"><i></i><span>Connecting</span></span>
+  </header>
+  <main id="app"><div class="panel"><h2>Starting…</h2></div></main>
+</div>
+<div class="toast" id="toast" hidden></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="/common.js"></script>
+<script src="/voice.js"></script>
+<script>
+"use strict";
+let st = null, hostPick = false, hostWonSeat = null, confirmNew = false, renderedSetup = false;
+
+connect("host=1", s => {
+  const prev = st, was = st && st.phase + st.round; st = s;
+  Voice.update(prev, s);
+  if (s.phase + s.round !== was) { hostPick = false; hostWonSeat = null; }
+  render();
+});
+
+function render() {
+  const app = $("#app");
+  if (st.phase === "setup") {
+    // Don't wipe the form while someone is choosing rules.
+    if (!renderedSetup || !app.querySelector("#rounds")) { app.innerHTML = setupHTML(); renderedSetup = true; }
+    return;
+  }
+  renderedSetup = false;
+  app.innerHTML = `<div class="cols"><div>${statusHTML()}${tableHTML()}</div><div>${joinHTML()}${seatsHTML()}${Voice.panelHTML()}${controlsHTML()}</div></div>`;
+  drawQR();
+}
+
+// ---------- setup ----------
+function setupHTML() {
+  const s = st.settings;
+  const rOpt = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12].map(n => `<option value="${n}" ${n === s.rounds ? "selected" : ""}>${n} round${n > 1 ? "s" : ""}</option>`).join("");
+  const hide = s.hide || "none";
+  return `<div class="panel">
+    <div class="eyebrow">New game</div>
+    <h2>Set the rules</h2>
+    <p class="muted">Players type their name when they scan the code. They join one at a time going clockwise around the table, so the join order matches the seating. On their phones they then pick the direction of play and who deals first.</p>
+    <div class="form">
+      <div class="field"><label for="rounds">Number of rounds</label><select id="rounds">${rOpt}</select></div>
+      <div class="field"><label for="extra">Extra haat over your call</label><select id="extra">
+        <option value="tenth" ${s.extra === "tenth" ? "selected" : ""}>Worth 0.1 each (call 3, win 5 → 3.2)</option>
+        <option value="none" ${s.extra === "none" ? "selected" : ""}>Worth nothing (call 3, win 5 → 3)</option></select></div>
+      <div class="field" style="grid-column:1/-1"><label for="hide">What phones can see</label><select id="hide">
+        <option value="none" ${hide === "none" ? "selected" : ""}>Everything: all calls, haat and scores, live</option>
+        <option value="round" ${hide === "round" ? "selected" : ""}>Hide calls until each round ends</option>
+        <option value="game" ${hide === "game" ? "selected" : ""}>Hide everything until the last round: each phone sees only its own numbers</option></select></div>
+    </div>
+    <label class="toggle"><input type="checkbox" id="max13" ${s.maxCall === 13 ? "checked" : ""}>
+      <div><b>Allow calls up to 13 haat</b><span class="muted">Off: the highest anyone can call is 8.</span></div></label>
+    <label class="toggle"><input type="checkbox" id="under13" ${s.allowUnder13 ? "checked" : ""}>
+      <div><b>Total haat called can be under 13</b><span class="muted">Off: Player 4 must call enough to bring the table's total to at least 13.</span></div></label>
+    <p class="muted">Win at least your call and you score your call. Fall short and you lose it (call 4, win 2 → −4). This laptop always shows every number.</p>
+    <div class="row"><button class="btn primary big" data-act="start">Start game & show QR code</button></div>
+  </div>`;
+}
+function readSettings() {
+  return {
+    rounds: +$("#rounds").value, extra: $("#extra").value, hide: $("#hide").value,
+    maxCall: $("#max13").checked ? 13 : 8, allowUnder13: $("#under13").checked,
+  };
+}
+
+// ---------- in game ----------
+const R = () => st.rounds[st.round];
+const readyChips = () => `<div class="chips">${[0, 1, 2, 3].map(i => `<span class="chip ${st.ready[i] ? "done" : ""}">${esc(nameOf(st, i))} · ${st.ready[i] ? "ready" : "waiting"}</span>`).join("")}</div>`;
+const skipBtn = label => `<button class="btn ghost small" data-act="skip">${label}</button>`;
+
+function statusHTML() {
+  const n = st.settings.rounds, head = `<div class="eyebrow">Round ${st.round + 1} of ${n}</div>`;
+  if (st.phase === "lobby") {
+    const count = st.joined.filter(Boolean).length;
+    return `<div class="panel"><div class="eyebrow">Lobby</div>
+      <h2>${count < 4 ? `Waiting for players · ${count} of 4 joined` : "Everyone's in. Waiting for all 4 to tap Start"}</h2>
+      <p class="muted">Round 1 starts by itself once every phone taps Start.</p>
+      ${count === 4 ? `<p>${dealLine(st, 0)}</p><p class="muted">Players choose the direction and first dealer on their phones.</p>` : ""}
+      ${count === 4 ? readyChips() + `<div class="row">${skipBtn("Start now without waiting")}</div>` : ""}</div>`;
+  }
+  if (st.phase === "calling" || st.phase === "playing") {
+    const r = R(), calling = st.phase === "calling";
+    const rows = r.order.map((i, j) => {
+      const c = r.calls[i], now = calling && i === st.caller;
+      return `<div class="p ${now ? "now" : ""}"><span class="k">${j + 1}</span><b>${esc(nameOf(st, i))}</b>${i === r.dealer ? `<span class="pill">deals</span>` : j === 0 ? `<span class="pill">leads</span>` : ""}
+        ${c != null ? `<span class="v">${c}</span>` : `<span class="st">${now ? "calling now" : "waiting"}</span>`}</div>`;
+    }).join("");
+    let extra;
+    if (calling) {
+      const name = esc(nameOf(st, st.caller));
+      extra = hostPick
+        ? `<div class="eyebrow">Enter ${name}'s call</div>${picker("hcall", st.minCall, st.settings.maxCall, null).replace("grid-pick", "grid-pick sm")}
+           <div class="row"><button class="btn ghost small" data-act="hostPickOff">Cancel</button></div>`
+        : `<div class="row"><button class="btn ghost small" data-act="hostPickOn">Enter for ${name}</button>
+           ${st.turn > 0 ? `<button class="btn ghost small" data-act="undo">Undo last call</button>` : ""}</div>`;
+    } else {
+      extra = `<p class="muted">The round ends when all 4 phones tap Round over.</p>${readyChips()}
+        <div class="row">${skipBtn("End round now")}<button class="btn ghost small" data-act="undo">Undo last call</button></div>`;
+    }
+    return `<div class="panel">${head}<p>${dealLine(st, st.round)}</p><div class="row" style="justify-content:space-between"><h2>${calling ? "Calling" : "Playing the hand"}</h2>
+      ${!calling ? `<span class="pill">Called <span class="num">${sum(r.calls)}</span> of 13</span>` : ""}</div>
+      <div class="order">${rows}</div>${extra}</div>`;
+  }
+  if (st.phase === "scoring") {
+    const r = R(), s = sum(r.won), all = r.won.every(v => v != null);
+    const rows = [0, 1, 2, 3].map(i => {
+      const w = r.won[i];
+      return `<div class="p"><span class="k">${i + 1}</span><b>${esc(nameOf(st, i))}</b><span class="st">called ${r.calls[i]}</span>
+        ${w != null ? `<span class="v">${w}</span>` : `<span class="st">waiting</span>`}
+        <button class="btn ghost small" data-act="hostWon" data-v="${i}">${w != null ? "Fix" : "Enter"}</button></div>
+        ${hostWonSeat === i ? picker("hwon", 0, 13, w).replace("grid-pick", "grid-pick sm") : ""}`;
+    }).join("");
+    return `<div class="panel">${head}<h2>Players are entering haat won</h2>
+      <div class="order">${rows}</div>
+      ${all && s !== 13 ? `<div class="callout warn">Haat won adds up to ${s}, not 13. Someone needs to fix their number.</div>`
+        : `<p class="muted">The round is scored as soon as all four numbers are in and add up to 13.</p>`}</div>`;
+  }
+  if (st.phase === "between") {
+    return `<div class="panel"><div class="eyebrow">Round ${st.round + 1} done</div><h2>Waiting for all 4 to start round ${st.round + 2}</h2><p>Next: ${dealLine(st, st.round + 1)}</p>
+      ${readyChips()}<div class="row">${skipBtn("Start next round now")}</div></div>`;
+  }
+  if (st.phase === "over") return `<div class="panel">${winnerHTML(st)}<div class="row"><button class="btn primary big" data-act="newGameYes">New game</button></div></div>`;
+  return "";
+}
+
+function tableHTML() {
+  if (!st.rounds.length) return "";
+  const ex = st.settings.extra;
+  let rows = "";
+  for (let k = 0; k < st.settings.rounds; k++) {
+    const r = st.rounds[k], done = roundDone(st, k);
+    const cls = !r ? "future" : (k === st.round && !done ? "cur" : "");
+    rows += `<tr class="${cls}"><td class="d">Round ${k + 1}</td>` + [0, 1, 2, 3].map(i => {
+      if (!r) return `<td class="muted">–</td>`;
+      const c = r.calls[i], w = r.won[i], s = done ? score10(c, w, ex) : null;
+      return `<td><span class="cell"><span class="s ${s < 0 ? "neg" : ""}">${s != null ? fmt(s) : "·"}</span><span class="cw">${c != null ? c : "_"} / ${w != null ? w : "_"}</span></span></td>`;
+    }).join("") + "</tr>";
+  }
+  const t = totals(st);
+  return `<div class="tablewrap"><table><thead><tr><th></th>${[0, 1, 2, 3].map(i => `<th class="p">${esc(nameOf(st, i))}</th>`).join("")}</tr></thead>
+    <tbody>${rows}</tbody><tfoot><tr><td class="d">Total</td>${t.map(v => `<td class="num ${v < 0 ? "neg" : ""}">${fmt(v)}</td>`).join("")}</tr></tfoot></table></div>
+    <p class="muted">Each cell: score, then called / won.${st.settings.hide === "game" ? " Phones can't see this table until the game ends." : ""}</p>`;
+}
+
+function joinHTML() {
+  const u = st.urls[0];
+  if (!u) return `<div class="panel"><div class="eyebrow">Join</div><div class="callout warn">This laptop isn't on a network. Connect to Wi-Fi so phones can join.</div></div>`;
+  return `<div class="panel"><div class="eyebrow">Scan to join · same Wi-Fi · one at a time, going clockwise</div>
+    <div class="join"><div class="qr" id="qr"></div><div style="min-width:0;flex:1"><div class="url">${esc(u)}</div>
+    <p class="muted">Open the camera, scan, type your name.</p>
+    <button class="btn ghost small" data-act="copy">Copy link</button></div></div></div>`;
+}
+function seatsHTML() {
+  return `<div class="panel"><div class="eyebrow">Seats, in join order</div><div class="order">${[0, 1, 2, 3].map(i =>
+    `<div class="p"><span class="k">${i + 1}</span><b>${st.joined[i] ? esc(nameOf(st, i)) : `<span class="muted">open</span>`}</b>
+     ${st.joined[i] ? `<button class="btn ghost small" data-act="release" data-v="${i}" title="Let a different phone take this seat">Free seat</button>` : ""}</div>`).join("")}</div></div>`;
+}
+function controlsHTML() {
+  return `<div class="row">${confirmNew
+    ? `<span>End this game and go back to the rules?</span><button class="btn primary small" data-act="newGameYes">Yes</button><button class="btn ghost small" data-act="newGameNo">No</button>`
+    : `<button class="btn ghost small" data-act="newGame">New game / change rules</button>`}</div>`;
+}
+function drawQR() {
+  const el = $("#qr"); if (!el || !window.QRCode) return;
+  const size = st.phase === "lobby" ? 220 : 150;
+  try { new QRCode(el, { text: st.urls[0], width: size, height: size, colorDark: "#15222c", colorLight: "#ffffff" }); } catch {}
+}
+
+// ---------- actions ----------
+document.addEventListener("click", async ev => {
+  const b = ev.target.closest("[data-act]"); if (!b) return;
+  const a = b.dataset.act, v = b.dataset.v;
+  switch (a) {
+    case "start": b.disabled = true; if (!(await act("startGame", { settings: readSettings() }))) b.disabled = false; break;
+    case "skip": act("skipWait"); break;
+    case "hostPickOn": hostPick = true; render(); break;
+    case "hostPickOff": hostPick = false; render(); break;
+    case "undo": act("undoCall"); break;
+    case "hostWon": hostWonSeat = hostWonSeat === +v ? null : +v; render(); break;
+    case "pick":
+      if (b.dataset.k === "hcall") { hostPick = false; act("hostCall", { value: +v }); }
+      else if (b.dataset.k === "hwon") { const seat = hostWonSeat; hostWonSeat = null; act("hostWon", { seat, value: +v }); }
+      break;
+    case "release": act("releaseSeat", { seat: +v }); break;
+    case "copy": try { await navigator.clipboard.writeText(st.urls[0]); toast("Link copied"); } catch { toast(st.urls[0]); } break;
+    case "newGame": confirmNew = true; render(); break;
+    case "newGameNo": confirmNew = false; render(); break;
+    case "newGameYes": confirmNew = false; act("newGame"); break;
+  }
+});
+</script>
+</body></html>

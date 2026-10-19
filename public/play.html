@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Call Break</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Delius+Swash+Caps&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head><body>
+<div class="wrap narrow">
+  <header>
+    <div class="brand"><span class="suit" aria-hidden="true">♠</span><h1>Call Break</h1></div>
+    <span class="pill" id="pill"><i></i><span>Connecting</span></span>
+  </header>
+  <main id="app"><div class="panel"><h2>Connecting to the table…</h2></div></main>
+</div>
+<div class="toast" id="toast" hidden></div>
+<script src="/common.js"></script>
+<script>
+"use strict";
+// Each phone gets its own id so the server knows which seat is whose.
+let token = lsGet("callbreak.token");
+if (!token) { token = Math.random().toString(36).slice(2) + Date.now().toString(36); lsSet("callbreak.token", token); }
+let st = null, pick = null, editing = false, key = "";
+
+connect("token=" + encodeURIComponent(token), s => {
+  // Clear a half-made choice when the step changes (new round, new phase, new turn).
+  const k = s.gameId + s.phase + s.round + s.turn;
+  if (k !== key) { pick = null; editing = false; key = k; }
+  st = s; render();
+});
+
+function render() {
+  const me = st.you, app = $("#app");
+  // Keep what's typed in the name box when other players join.
+  if (me == null && st.phase !== "setup" && app.querySelector("#name")) { const f = app.querySelector("#full"); if (f) f.hidden = !st.joined.every(Boolean); return; }
+  if (st.phase === "setup") { app.innerHTML = `<div class="panel"><h2>The host is setting up the game</h2><p class="muted">This page will update when it's ready. Keep it open.</p></div>`; return; }
+  if (me == null) { app.innerHTML = joinHTML(); return; }
+  const label = st.phase === "lobby" ? "Lobby" : st.phase === "over" ? "Final" : `Round ${st.round + 1} of ${st.settings.rounds}`;
+  const head = `<div class="row" style="justify-content:space-between"><span class="eyebrow">${label}</span><span class="pill">You are Player ${me + 1}</span></div>`;
+  const inRound = !["lobby", "over"].includes(st.phase);
+  const k = st.phase === "between" ? st.round + 1 : st.round;
+  const deal = inRound ? `<p class="muted">${st.phase === "between" ? "Next round: " : ""}${dealLine(st, k)}</p>` : "";
+  app.innerHTML = `<div class="panel">${head}${deal}${stepHTML(me)}</div>${resultHTML(me)}${st.rounds.length ? totalsHTML(st, me) : ""}`;
+}
+
+function joinHTML() {
+  const full = st.joined.every(Boolean);
+  return `<div class="panel"><div class="eyebrow">Join the table</div><h2>What's your name?</h2>
+    <input type="text" id="name" maxlength="18" autocomplete="nickname" placeholder="Your name" value="${esc(lsGet("callbreak.name") || "")}">
+    <button class="btn primary big" data-act="join">Join</button>
+    <div class="callout warn" id="full" ${full ? "" : "hidden"}>The table is full. Ask the host to free a seat.</div>
+    <p class="muted">Join one at a time, going clockwise around the table. The first to join is Player 1.</p></div>`;
+}
+
+const hidesCalls = () => secret(st) || (st.settings.hide === "round" && (st.phase === "calling" || st.phase === "playing"));
+const chips = (r, showWon) => `<div class="chips">${r.order.map(i => {
+  const c = r.calls[i], w = r.won[i], done = showWon ? w != null : c != null;
+  return `<span class="chip ${done ? "done" : ""}">${esc(nameOf(st, i))} <span class="num">${c != null ? c : "…"}${showWon ? " / " + (w != null ? w : "…") : ""}</span></span>`;
+}).join("")}</div>`;
+const readyChips = () => `<div class="chips">${[0, 1, 2, 3].map(i => `<span class="chip ${st.ready[i] ? "done" : ""}">${esc(nameOf(st, i))} ${st.ready[i] ? "✓" : "…"}</span>`).join("")}</div>`;
+const readyBtn = (me, label) => st.ready[me]
+  ? `<button class="btn big" data-act="unready">Waiting for the others · tap to undo</button>`
+  : `<button class="btn primary big" data-act="ready">${label}</button>`;
+
+function stepHTML(me) {
+  const r = st.rounds[st.round];
+  if (st.phase === "lobby") {
+    const n = st.joined.filter(Boolean).length;
+    if (n < 4) return `<h2>Hi ${esc(nameOf(st, me))}!</h2><div class="wait">Waiting for ${4 - n} more player${4 - n > 1 ? "s" : ""}<span class="dots"></span></div>
+      <div class="chips">${[0, 1, 2, 3].map(i => `<span class="chip ${st.joined[i] ? "done" : ""}">${i + 1}. ${st.joined[i] ? esc(nameOf(st, i)) : "open"}</span>`).join("")}</div>
+      <button class="btn ghost small" data-act="leave">Leave the table</button>`;
+    const dirBtn = d => `<button class="btn ${st.direction === d ? "primary" : ""}" data-act="dir" data-v="${d}">${dirName(d)}</button>`;
+    return `<h2>Everyone's here</h2>
+      <div class="eyebrow">Direction of play</div><div class="row">${dirBtn(1)}${dirBtn(-1)}</div>
+      <div class="eyebrow">Who deals first?</div>
+      <div class="seats">${[0, 1, 2, 3].map(i => `<button class="seat-btn" data-act="dealer" data-v="${i}" aria-pressed="${st.firstDealer === i}">
+        <span class="eyebrow">Player ${i + 1}${st.firstDealer === i ? " · deals" : ""}</span><b>${esc(nameOf(st, i))}</b></button>`).join("")}</div>
+      <div class="callout">${dealLine(st, 0)}. The deal then moves ${dirName(st.direction).toLowerCase()} each round.</div>
+      <p class="muted">Anyone can change these. A change clears everyone's Start, so all four confirm the same setup.</p>
+      ${readyBtn(me, "Start round 1")}${readyChips()}`;
+  }
+  if (st.phase === "over") return winnerHTML(st);
+
+  if (st.phase === "calling") {
+    if (r.calls[me] != null) {
+      return `<div class="big-call"><span class="n">${r.calls[me]}</span><span class="muted">your call</span></div>
+        <div class="wait">Waiting for ${esc(nameOf(st, st.caller))}<span class="dots"></span></div>${chips(r, false)}`;
+    }
+    if (st.caller !== me) {
+      const ahead = r.order.indexOf(me) - st.turn - 1;
+      return `<div class="wait">Waiting for ${esc(nameOf(st, st.caller))}<span class="dots"></span></div>
+        <p class="muted">You call ${ahead === 0 ? "next" : `after ${ahead} more player${ahead > 1 ? "s" : ""}`}.</p>${chips(r, false)}`;
+    }
+    const lo = st.minCall;
+    return `<h2>Your turn. How many haat will you call?</h2>
+      <p class="muted">${hidesCalls() ? "Other calls are hidden." : `Table has called ${sum(r.calls)} so far.`}${lo > 1 ? ` You need to call at least ${lo} to make 13.` : ""}</p>
+      ${picker("call", lo, st.settings.maxCall, pick)}
+      <button class="btn primary big" data-act="sendCall" ${pick == null ? "disabled" : ""}>Lock in ${pick != null ? pick + " haat" : "call"}</button>
+      ${chips(r, false)}`;
+  }
+  if (st.phase === "playing") {
+    return `<div class="big-call"><span class="n">${r.calls[me]}</span><span class="muted">your call${hidesCalls() ? "" : ` · table called ${sum(r.calls)} of 13`}</span></div>
+      <h2>Play the hand!</h2>${chips(r, false)}
+      <p class="muted">When all 13 haat are played, tap Round over. The round ends when all four tap it.</p>
+      ${readyBtn(me, "Round over")}${readyChips()}`;
+  }
+  if (st.phase === "scoring") {
+    const w = r.won[me];
+    if (w == null || editing) {
+      return `<div class="big-call"><span class="n">${r.calls[me]}</span><span class="muted">your call</span></div>
+        <h2>How many haat did you win?</h2>${picker("won", 0, 13, pick != null ? pick : w)}
+        <div class="row"><button class="btn primary big" data-act="sendWon" ${pick == null ? "disabled" : ""}>Submit ${pick != null ? pick + " haat" : ""}</button>
+        ${editing ? `<button class="btn ghost" data-act="cancel">Cancel</button>` : ""}</div>`;
+    }
+    const waiting = [0, 1, 2, 3].filter(i => r.won[i] == null).map(i => nameOf(st, i)), s = score10(r.calls[me], w, st.settings.extra);
+    return `<div class="big-call"><span class="n ${s < 0 ? "neg" : "pos"}">${fmt(s, true)}</span><span class="muted">called ${r.calls[me]}, won ${w}</span></div>
+      ${waiting.length ? `<div class="wait">Waiting for ${esc(waiting.join(", "))}<span class="dots"></span></div>`
+        : st.mismatch != null ? `<div class="callout warn">Everyone's haat add up to ${st.mismatch}, not 13. Check your number and fix it if it's wrong.</div>` : ""}
+      ${chips(r, true)}<div class="row"><button class="btn ghost small" data-act="edit">Change my haat</button></div>`;
+  }
+  if (st.phase === "between") {
+    return `<h2>Round ${st.round + 1} done</h2><p class="muted">Round ${st.round + 2} starts when all four tap Start.</p>
+      ${readyBtn(me, `Start round ${st.round + 2}`)}${readyChips()}`;
+  }
+  return "";
+}
+
+// Round results: just your own while numbers are hidden, everyone's otherwise, and the full sheet at the end.
+function resultHTML(me) {
+  if (st.phase === "over") {
+    const rows = st.rounds.map((r, k) => `<tr><td class="d">Round ${k + 1}</td>${[0, 1, 2, 3].map(i => {
+      const s = score10(r.calls[i], r.won[i], st.settings.extra);
+      return `<td><span class="cell"><span class="s ${s < 0 ? "neg" : ""}">${fmt(s)}</span><span class="cw">${r.calls[i]} / ${r.won[i]}</span></span></td>`;
+    }).join("")}</tr>`).join("");
+    return `<div class="tablewrap"><table><thead><tr><th></th>${[0, 1, 2, 3].map(i => `<th class="p">${esc(nameOf(st, i))}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+  const k = st.phase === "between" ? st.round : st.round - 1;
+  if (k < 0 || !st.rounds[k]) return "";
+  const r = st.rounds[k];
+  const who = secret(st) ? [me] : [0, 1, 2, 3];
+  return `<div class="panel"><div class="eyebrow">Round ${k + 1} result${secret(st) ? " · yours only" : ""}</div><div class="chips">${who.map(i => {
+    const s = score10(r.calls[i], r.won[i], st.settings.extra);
+    return `<span class="chip">${esc(nameOf(st, i))} <span class="num">${r.calls[i]}/${r.won[i]}</span> <span class="num ${s < 0 ? "neg" : "pos"}">${fmt(s, true)}</span></span>`;
+  }).join("")}</div></div>`;
+}
+
+document.addEventListener("click", async ev => {
+  const b = ev.target.closest("[data-act]"); if (!b) return;
+  const a = b.dataset.act, v = b.dataset.v;
+  if (a === "join") {
+    const name = $("#name").value.trim(); if (!name) { toast("Type your name first."); return; }
+    lsSet("callbreak.name", name); b.disabled = true;
+    if (!(await act("join", { token, name }))) b.disabled = false;
+  }
+  else if (a === "leave") act("leave", { token });
+  else if (a === "dir") act("table", { token, direction: +v });
+  else if (a === "dealer") act("table", { token, firstDealer: +v });
+  else if (a === "ready") act("ready", { token, value: true });
+  else if (a === "unready") act("ready", { token, value: false });
+  else if (a === "pick") { pick = +v; render(); }
+  else if (a === "sendCall" && pick != null) { b.disabled = true; if (await act("call", { token, value: pick })) pick = null; else b.disabled = false; }
+  else if (a === "sendWon" && pick != null) { b.disabled = true; if (await act("won", { token, value: pick })) { pick = null; editing = false; render(); } else b.disabled = false; }
+  else if (a === "edit") { editing = true; pick = null; render(); }
+  else if (a === "cancel") { editing = false; pick = null; render(); }
+});
+document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "name") document.querySelector('[data-act="join"]').click(); });
+</script>
+</body></html>
